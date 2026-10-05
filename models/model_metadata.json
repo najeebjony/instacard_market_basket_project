@@ -1,0 +1,65 @@
+{
+  "best_model_name": "Enhanced Tuned XGBoost + Blended Ensemble",
+  "optimal_accuracy_threshold": 0.88,
+  "optimal_f1_threshold": 0.71,
+  "boosted_accuracy_score": 0.9105,
+  "ensemble_roc_auc": 0.8355,
+  "feature_cols": [
+    "user_total_orders",
+    "user_total_items",
+    "user_reorder_ratio",
+    "user_avg_days_between_orders",
+    "user_distinct_products",
+    "user_avg_basket_size",
+    "user_reorder_velocity",
+    "prod_total_purchases",
+    "prod_reorder_ratio",
+    "prod_avg_cart_position",
+    "prod_distinct_users",
+    "aisle_id",
+    "department_id",
+    "prod_dept_reorder_share",
+    "up_total_orders",
+    "up_first_order_number",
+    "up_last_order_number",
+    "up_avg_cart_position",
+    "up_reorder_ratio",
+    "up_orders_since_last_purchase",
+    "up_order_rate",
+    "up_streak_since_first",
+    "up_slot_priority_ratio",
+    "order_dow",
+    "order_hour_of_day",
+    "days_since_prior_order",
+    "reorder_gap_ratio"
+  ],
+  "metrics_summary": [
+    {
+      "Model": "Random Forest",
+      "Default Accuracy": 0.7949,
+      "Precision": 0.2787,
+      "Recall": 0.6957,
+      "F1-Score": 0.3979,
+      "ROC-AUC": 0.8326,
+      "Training Time (s)": 83.36
+    },
+    {
+      "Model": "XGBoost",
+      "Default Accuracy": 0.7632,
+      "Precision": 0.255,
+      "Recall": 0.7444,
+      "F1-Score": 0.3799,
+      "ROC-AUC": 0.8353,
+      "Training Time (s)": 11.85
+    },
+    {
+      "Model": "LightGBM",
+      "Default Accuracy": 0.7596,
+      "Precision": 0.2525,
+      "Recall": 0.7485,
+      "F1-Score": 0.3776,
+      "ROC-AUC": 0.8351,
+      "Training Time (s)": 9.38
+    }
+  ]
+}

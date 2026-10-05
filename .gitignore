@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+
+# Large raw CSV files (>100MB exceeds GitHub push limit)
+data/orders.csv
+data/order_products__prior.csv
+data/order_products__train.csv
+data/features_engineered_sample.csv
+
+# Temporary files & logs
+*.log
+scratch/
