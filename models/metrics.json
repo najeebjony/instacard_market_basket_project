@@ -1,0 +1,52 @@
+{
+  "default_0.5": {
+    "Random Forest": {
+      "threshold": 0.5,
+      "accuracy": 0.7735,
+      "precision": 0.2622,
+      "recall": 0.7298,
+      "f1": 0.3857,
+      "roc_auc": 0.8333,
+      "tn": 119787,
+      "fp": 34132,
+      "fn": 4491,
+      "tp": 12127
+    },
+    "XGBoost (Tuned)": {
+      "threshold": 0.5,
+      "accuracy": 0.7631,
+      "precision": 0.2548,
+      "recall": 0.744,
+      "f1": 0.3796,
+      "roc_auc": 0.8349,
+      "tn": 117767,
+      "fp": 36152,
+      "fn": 4254,
+      "tp": 12364
+    },
+    "LightGBM": {
+      "threshold": 0.5,
+      "accuracy": 0.7588,
+      "precision": 0.252,
+      "recall": 0.7498,
+      "f1": 0.3773,
+      "roc_auc": 0.8353,
+      "tn": 116942,
+      "fp": 36977,
+      "fn": 4158,
+      "tp": 12460
+    }
+  },
+  "final_tuned": {
+    "threshold": 0.72,
+    "accuracy": 0.8787,
+    "precision": 0.4014,
+    "recall": 0.4979,
+    "f1": 0.4445,
+    "roc_auc": 0.8349,
+    "tn": 141582,
+    "fp": 12337,
+    "fn": 8344,
+    "tp": 8274
+  }
+}

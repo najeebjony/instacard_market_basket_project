@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import joblib
 import json
 import os
+from sklearn.metrics import roc_curve, roc_auc_score, precision_recall_curve
 
 # ---------------------------------------------------------
 # Page Configuration & Global Styling
@@ -118,6 +119,80 @@ sample_df = load_sample_dataset()
 catalog_df = load_catalog_data()
 
 
+@st.cache_data
+def load_json_file(name):
+    """models/ folder se koi bhi json file (metrics.json, threshold.json) load karta hai."""
+    p = os.path.join(os.path.dirname(__file__), '..', 'models', name)
+    if not os.path.exists(p):
+        p = os.path.join('models', name)
+    if os.path.exists(p):
+        with open(p, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+@st.cache_data
+def load_heatmap_counts():
+    """data/dow_hour_counts.csv: rows = day of week (0-6), columns = hour (0-23)."""
+    for base in (os.path.join(os.path.dirname(__file__), '..', 'data'), 'data'):
+        p = os.path.join(base, 'dow_hour_counts.csv')
+        if os.path.exists(p):
+            return pd.read_csv(p, index_col=0)
+    return None
+
+@st.cache_data(show_spinner=False)
+def compute_sample_scores(_model, _sample, feats_key):
+    feats = list(feats_key)
+    X = _sample[feats].fillna(0)
+    return _sample['reordered'].values.astype(int), _model.predict_proba(X)[:, 1]
+
+def metrics_at(y, p, t):
+    pred = (p >= t).astype(int)
+    tp = int(((pred == 1) & (y == 1)).sum())
+    fp = int(((pred == 1) & (y == 0)).sum())
+    fn = int(((pred == 0) & (y == 1)).sum())
+    tn = int(((pred == 0) & (y == 0)).sum())
+    prec = tp / (tp + fp) if (tp + fp) else 0.0
+    rec = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
+    return {"threshold": float(t), "accuracy": (tp + tn) / len(y), "precision": prec,
+            "recall": rec, "f1": f1, "tn": tn, "fp": fp, "fn": fn, "tp": tp}
+
+def best_f1_threshold(y, p):
+    pr, rc, th = precision_recall_curve(y, p)
+    f1 = 2 * pr * rc / (pr + rc + 1e-9)
+    return float(th[int(np.argmax(f1[:-1]))])
+
+# Model ki asal feature list (training wali) aur held-out test sample ka live scoring
+if model is not None and hasattr(model, 'feature_names_in_'):
+    MODEL_FEATURES = list(model.feature_names_in_)
+else:
+    MODEL_FEATURES = list(metadata.get('feature_cols', []))
+
+SAMPLE_OK = (model is not None and not sample_df.empty and 'reordered' in sample_df.columns
+             and len(MODEL_FEATURES) > 0 and all(f in sample_df.columns for f in MODEL_FEATURES))
+if SAMPLE_OK:
+    Y_S, P_S = compute_sample_scores(model, sample_df, tuple(MODEL_FEATURES))
+else:
+    Y_S, P_S = None, None
+
+metrics_file = load_json_file('metrics.json')
+
+THRESHOLD = load_json_file('threshold.json').get('threshold')
+if THRESHOLD is None:
+    THRESHOLD = best_f1_threshold(Y_S, P_S) if SAMPLE_OK else 0.5
+THRESHOLD = float(THRESHOLD)
+
+if metrics_file.get('final_tuned'):
+    HEADLINE = dict(metrics_file['final_tuned'])
+    HEADLINE['source'] = "full test set"
+elif SAMPLE_OK:
+    HEADLINE = metrics_at(Y_S, P_S, THRESHOLD)
+    HEADLINE['roc_auc'] = float(roc_auc_score(Y_S, P_S))
+    HEADLINE['source'] = f"{len(Y_S):,}-row test sample"
+else:
+    HEADLINE = None
+
+
 # ---------------------------------------------------------
 # Sidebar Navigation & Portfolio Profile
 # ---------------------------------------------------------
@@ -160,7 +235,7 @@ if page == "🏠 Executive Home":
         st.markdown("""
         <div class="metric-card">
             <div class="metric-value">3.4 Million+</div>
-            <div class="metric-label">Historical Orders Analyzed</div>
+            <div class="metric-label">Orders in Source Dataset</div>
         </div>
         """, unsafe_allow_html=True)
     with col2:
@@ -170,18 +245,20 @@ if page == "🏠 Executive Home":
             <div class="metric-label">Active Grocery Products</div>
         </div>
         """, unsafe_allow_html=True)
+    auc_txt = f"{HEADLINE['roc_auc']:.4f}" if HEADLINE and HEADLINE.get('roc_auc') else "N/A"
+    f1_txt = f"{HEADLINE['f1']:.3f}" if HEADLINE else "N/A"
     with col3:
-        st.markdown("""
+        st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-value">0.8355</div>
-            <div class="metric-label">Ensemble ROC-AUC Score</div>
+            <div class="metric-value">{auc_txt}</div>
+            <div class="metric-label">ROC-AUC (Held-out Users)</div>
         </div>
         """, unsafe_allow_html=True)
     with col4:
-        st.markdown("""
+        st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-value">91.05%</div>
-            <div class="metric-label">Boosted Accuracy (Tuned)</div>
+            <div class="metric-value">{f1_txt}</div>
+            <div class="metric-label">F1-Score (Tuned Threshold)</div>
         </div>
         """, unsafe_allow_html=True)
         
@@ -201,7 +278,7 @@ if page == "🏠 Executive Home":
         
         st.subheader("🏗️ Architecture & Pipeline Flow")
         st.markdown("""
-        1. **Smart User-Stratified Sampling:** 15% users ki 100% full temporal history preserve ki gayi.
+        1. **Smart User-Stratified Sampling:** ~13,000 users (10% of train users) ki 100% full temporal history preserve ki gayi.
         2. **Multi-Level Feature Store:** User Profile, Product Affinity, User $\\times$ Product Recency, aur Time Context.
         3. **Leakage-Free Validation:** Strict User-wise 80/20 train/test split.
         4. **Imbalance-Aware Modeling:** GridSearchCV tuned XGBoost, LightGBM, Random Forest with `scale_pos_weight`.
@@ -308,21 +385,21 @@ elif page == "⏰ Temporal Dynamics":
         st.plotly_chart(fig_hour, use_container_width=True)
         
     st.subheader("Day of Week vs. Hour of Day Heatmap")
-    # Matrix representation
-    heatmap_matrix = np.random.RandomState(42).randint(15000, 45000, size=(7, 24))
-    heatmap_matrix[0, 9:15] = np.random.randint(48000, 58000, size=6)
-    heatmap_matrix[1, 9:14] = np.random.randint(45000, 54000, size=5)
-    
-    fig_heat = px.imshow(
-        heatmap_matrix,
-        labels=dict(x="Hour of Day", y="Day of Week", color="Order Density"),
-        x=[f"{h}:00" for h in range(24)],
-        y=["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
-        color_continuous_scale="YlGnBu",
-        title="<b>Traffic Hotspots: Day of Week × Hour of Day</b>"
-    )
-    fig_heat.update_layout(height=400, template="plotly_white")
-    st.plotly_chart(fig_heat, use_container_width=True)
+    hm = load_heatmap_counts()
+    if hm is not None and hm.shape == (7, 24):
+        fig_heat = px.imshow(
+            hm.values,
+            labels=dict(x="Hour of Day", y="Day of Week", color="Orders"),
+            x=[f"{h}:00" for h in range(24)],
+            y=["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+            color_continuous_scale="YlGnBu",
+            title="<b>Traffic Hotspots: Day of Week × Hour of Day</b>"
+        )
+        fig_heat.update_layout(height=400, template="plotly_white")
+        st.plotly_chart(fig_heat, use_container_width=True)
+    else:
+        st.warning("Heatmap data file `data/dow_hour_counts.csv` nahi mili (7 rows × 24 columns chahiye). "
+                   "Notebook me `pd.crosstab(orders['order_dow'], orders['order_hour_of_day']).to_csv('../data/dow_hour_counts.csv')` chala kar banao.")
     
     st.info("💡 **Executive Takeaway:** Sunday 9:00 AM - 2:00 PM aur Monday 9:00 AM - 12:00 PM peak rush period hain. Real-time batch delivery fleet allocation aur warehouse personnel shift planning isi schedule ke mutabiq optimize ki jani chahiye.")
 
@@ -332,111 +409,145 @@ elif page == "⏰ Temporal Dynamics":
 # =========================================================
 elif page == "🤖 ML Benchmarking":
     st.title("🤖 Machine Learning Model Benchmarking & Interpretability")
-    st.write("Rigorous comparative evaluation of Random Forest, XGBoost, and LightGBM with GridSearchCV hyperparameter tuning.")
-    
-    # Model comparison table
-    comp_df = pd.DataFrame([
-        {"Model": "Random Forest", "Default Acc": "79.49%", "Precision": "0.2710", "Recall": "69.57%", "F1-Score": "0.3901", "ROC-AUC": 0.8326, "Training Time": "83.4 s"},
-        {"Model": "LightGBM", "Default Acc": "75.96%", "Precision": "0.2520", "Recall": "74.85%", "F1-Score": "0.3770", "ROC-AUC": 0.8351, "Training Time": "9.4 s"},
-        {"Model": "XGBoost (Tuned)", "Default Acc": "76.32%", "Precision": "0.2545", "Recall": "74.44%", "F1-Score": "0.3792", "ROC-AUC": 0.8353, "Training Time": "11.8 s"},
-        {"Model": "🏆 Weighted Blended Ensemble", "Default Acc": "76.52%", "Precision": "0.2580", "Recall": "74.23%", "F1-Score": "0.3828", "ROC-AUC": 0.8355, "Training Time": "Ensemble"},
-        {"Model": "⚡ Optimized Threshold Ensemble (T=0.88)", "Default Acc": "91.05%", "Precision": "0.6188", "Recall": "42.10%", "F1-Score": "0.5012", "ROC-AUC": 0.8355, "Training Time": "Post-Tuned"}
-    ])
-    
-    st.subheader("📋 Comprehensive Model Performance Benchmark Table")
-    st.dataframe(comp_df, use_container_width=True)
-    
+    st.write("Random Forest, XGBoost aur LightGBM ka muqabla, GridSearchCV tuning aur decision threshold optimization. "
+             "Neeche ke numbers saved model aur held-out test users se nikalay gaye hain.")
+
+    def fmt_row(name, m):
+        return {
+            "Model": name,
+            "Threshold": round(float(m.get("threshold", 0.5)), 3),
+            "Accuracy": f"{m['accuracy'] * 100:.2f}%",
+            "Precision": f"{m['precision'] * 100:.1f}%",
+            "Recall": f"{m['recall'] * 100:.1f}%",
+            "F1-Score": f"{m['f1']:.4f}",
+            "ROC-AUC": m.get("roc_auc", "-"),
+        }
+
+    # ---- 1. Comparison table
+    st.subheader("📋 Model Performance Benchmark")
+    rows = []
+    if metrics_file.get("default_0.5"):
+        rows = [fmt_row(n, m) for n, m in metrics_file["default_0.5"].items()]
+        if metrics_file.get("final_tuned"):
+            rows.append(fmt_row("⚡ Tuned XGBoost @ optimized threshold", metrics_file["final_tuned"]))
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption("Source: `models/metrics.json` (poora held-out test set).")
+    elif SAMPLE_OK:
+        auc_s = float(roc_auc_score(Y_S, P_S))
+        r1 = metrics_at(Y_S, P_S, 0.5); r1["roc_auc"] = round(auc_s, 4)
+        r2 = metrics_at(Y_S, P_S, THRESHOLD); r2["roc_auc"] = round(auc_s, 4)
+        st.dataframe(pd.DataFrame([fmt_row("Saved model @ default 0.50", r1),
+                                   fmt_row("Saved model @ optimized threshold", r2)]),
+                     use_container_width=True, hide_index=True)
+        st.caption(f"Live computed on {len(Y_S):,} held-out test rows. Teeno models ka poora table dekhne ke liye `metrics.json` generate karo.")
+    else:
+        st.warning("Model ya test sample file nahi mili, isliye benchmark table nahi dikha sakte.")
+
     st.markdown("---")
-    st.subheader("🎛️ Interactive Decision Threshold & Accuracy Optimizer")
-    st.write("Imbalanced grocery data me threshold slide karke dekhein ke model ki **Accuracy 76% se 91%+** tak kaise barhti hai:")
-    
-    sim_t = st.slider("Decision Threshold (T)", min_value=0.10, max_value=0.90, value=0.88, step=0.02)
-    
-    # Mathematical approximation of threshold response curve on Instacart test distribution
-    sim_acc = min(91.5, max(65.0, 68.0 + (sim_t * 26.5) - (0.5 * (sim_t - 0.88)**2 * 50)))
-    sim_rec = max(15.0, min(95.0, 95.0 - (sim_t * 60.0)))
-    sim_prec = min(75.0, max(12.0, 15.0 + (sim_t * 52.0)))
-    sim_f1 = 2 * (sim_prec * sim_rec) / (sim_prec + sim_rec + 1e-5) / 100
-    
-    t_col1, t_col2, t_col3, t_col4 = st.columns(4)
-    with t_col1:
-        st.metric("Classification Accuracy", f"{sim_acc:.2f}%", f"{'+' if sim_acc > 76.5 else ''}{sim_acc - 76.5:.1f}% vs baseline")
-    with t_col2:
-        st.metric("Precision Rate", f"{sim_prec:.2f}%", f"{sim_prec - 25.8:.1f}% vs baseline")
-    with t_col3:
-        st.metric("Target Recall Rate", f"{sim_rec:.2f}%", f"{sim_rec - 74.2:.1f}% vs baseline")
-    with t_col4:
-        st.metric("F1-Score", f"{sim_f1:.4f}")
-        
+
+    # ---- 2. Interactive threshold explorer (asal model se)
+    st.subheader("🎛️ Interactive Decision Threshold Explorer")
+    if SAMPLE_OK:
+        base_rate = float(Y_S.mean())
+        st.write(f"Threshold slide karo aur dekho precision, recall aur F1 kaise badalte hain. "
+                 f"Dhyan rahe: sirf **{base_rate * 100:.1f}%** rows reorder hain, isliye hamesha 'No' bolne se bhi "
+                 f"**{(1 - base_rate) * 100:.1f}%** accuracy mil jati hai. Accuracy yahan dhoka deti hai, F1 aur precision-recall dekho.")
+        sim_t = st.slider("Decision Threshold (T)", 0.10, 0.95,
+                          float(min(max(round(THRESHOLD, 2), 0.10), 0.95)), 0.01)
+        cur = metrics_at(Y_S, P_S, sim_t)
+        base = metrics_at(Y_S, P_S, 0.5)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Accuracy", f"{cur['accuracy'] * 100:.2f}%", f"{(cur['accuracy'] - base['accuracy']) * 100:+.1f} pts vs T=0.50")
+        c2.metric("Precision", f"{cur['precision'] * 100:.1f}%", f"{(cur['precision'] - base['precision']) * 100:+.1f} pts vs T=0.50")
+        c3.metric("Recall", f"{cur['recall'] * 100:.1f}%", f"{(cur['recall'] - base['recall']) * 100:+.1f} pts vs T=0.50")
+        c4.metric("F1-Score", f"{cur['f1']:.4f}", f"{cur['f1'] - base['f1']:+.4f} vs T=0.50")
+
+        ts = np.linspace(0.05, 0.95, 91)
+        curve = pd.DataFrame([metrics_at(Y_S, P_S, t) for t in ts])
+        fig_thr = go.Figure()
+        fig_thr.add_trace(go.Scatter(x=curve["threshold"], y=curve["precision"], mode="lines", name="Precision", line=dict(color="#3B82F6", width=2.5)))
+        fig_thr.add_trace(go.Scatter(x=curve["threshold"], y=curve["recall"], mode="lines", name="Recall", line=dict(color="#F59E0B", width=2.5)))
+        fig_thr.add_trace(go.Scatter(x=curve["threshold"], y=curve["f1"], mode="lines", name="F1-Score", line=dict(color="#10B981", width=3.5)))
+        fig_thr.add_vline(x=sim_t, line_dash="dash", line_color="gray")
+        fig_thr.update_layout(title="<b>Precision / Recall / F1 vs Threshold</b>", xaxis_title="Decision Threshold",
+                              yaxis_title="Score", template="plotly_white", height=380)
+        st.plotly_chart(fig_thr, use_container_width=True)
+        st.caption(f"Live computed from the saved model on {len(Y_S):,} held-out test rows (unseen users). "
+                   f"Deployed (F1-optimized) threshold: **{THRESHOLD:.2f}**.")
+    else:
+        sim_t = None
+        st.warning("Threshold explorer ke liye `models/best_reorder_model.joblib` aur `data/app_sample_data.csv` chahiye.")
+
     st.markdown("---")
-    
+
+    # ---- 3. ROC + Feature importance (asal)
     col_m1, col_m2 = st.columns(2)
     with col_m1:
-        st.subheader("ROC Curves Comparison")
-        fig_roc = go.Figure()
-        fig_roc.add_trace(go.Scatter(x=[0, 0.05, 0.15, 0.3, 0.5, 0.7, 1], y=[0, 0.46, 0.70, 0.83, 0.92, 0.97, 1], mode='lines', name='Blended Ensemble (AUC = 0.8355)', line=dict(color='#10B981', width=3.5)))
-        fig_roc.add_trace(go.Scatter(x=[0, 0.05, 0.15, 0.3, 0.5, 0.7, 1], y=[0, 0.45, 0.68, 0.82, 0.91, 0.96, 1], mode='lines', name='XGBoost / LightGBM (AUC = 0.8353)', line=dict(color='#F59E0B', width=2.5)))
-        fig_roc.add_trace(go.Scatter(x=[0, 0.05, 0.15, 0.3, 0.5, 0.7, 1], y=[0, 0.42, 0.65, 0.80, 0.90, 0.95, 1], mode='lines', name='Random Forest (AUC = 0.8326)', line=dict(color='#3B82F6', width=2)))
-        fig_roc.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode='lines', name='Random Guess (AUC = 0.5000)', line=dict(color='gray', dash='dash')))
-        fig_roc.update_layout(title="<b>Multi-Model ROC-AUC Benchmark</b>", xaxis_title="False Positive Rate", yaxis_title="True Positive Rate (Recall)", template="plotly_white")
-        st.plotly_chart(fig_roc, use_container_width=True)
-        
+        st.subheader("ROC Curve (Saved Model)")
+        if SAMPLE_OK:
+            fpr, tpr, _ = roc_curve(Y_S, P_S)
+            auc_val = float(roc_auc_score(Y_S, P_S))
+            fig_roc = go.Figure()
+            fig_roc.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"Saved model (AUC = {auc_val:.4f})", line=dict(color="#10B981", width=3.5)))
+            fig_roc.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="Random Guess (AUC = 0.5000)", line=dict(color="gray", dash="dash")))
+            fig_roc.update_layout(title="<b>ROC Curve</b>", xaxis_title="False Positive Rate", yaxis_title="True Positive Rate (Recall)", template="plotly_white")
+            st.plotly_chart(fig_roc, use_container_width=True)
+            st.caption(f"Live computed on {len(Y_S):,} test rows. Random Forest / LightGBM ke curves notebook `02_model_training.ipynb` me hain.")
+        else:
+            st.info("ROC curve ke liye model aur test sample chahiye.")
+
     with col_m2:
-        st.subheader("Top 10 Feature Importances (Gain)")
-        feat_imp_df = pd.DataFrame({
-            "Feature": ["up_orders_since_last_purchase", "up_reorder_ratio", "up_streak_since_first", "up_order_rate",
-                        "up_total_orders", "reorder_gap_ratio", "user_total_orders", "prod_dept_reorder_share",
-                        "prod_reorder_ratio", "days_since_prior_order"],
-            "Importance (%)": [21.50, 17.80, 15.40, 14.90, 12.80, 5.20, 3.80, 3.10, 2.90, 2.60]
-        })
-        fig_imp = px.bar(feat_imp_df, x="Importance (%)", y="Feature", orientation="h", color="Importance (%)", color_continuous_scale="Darkmint", title="<b>Key Predictive Drivers</b>")
-        fig_imp.update_layout(yaxis={'categoryorder':'total ascending'}, template="plotly_white", showlegend=False)
-        st.plotly_chart(fig_imp, use_container_width=True)
+        st.subheader("Top 10 Feature Importances")
+        if model is not None and hasattr(model, "feature_importances_") and len(MODEL_FEATURES) == len(model.feature_importances_):
+            imp = pd.Series(model.feature_importances_, index=MODEL_FEATURES).sort_values(ascending=False).head(10)
+            feat_imp_df = pd.DataFrame({"Feature": imp.index, "Importance (%)": (imp.values * 100).round(2)})
+            fig_imp = px.bar(feat_imp_df, x="Importance (%)", y="Feature", orientation="h", color="Importance (%)",
+                             color_continuous_scale="Darkmint", title="<b>Key Predictive Drivers</b>")
+            fig_imp.update_layout(yaxis={'categoryorder': 'total ascending'}, template="plotly_white", showlegend=False)
+            st.plotly_chart(fig_imp, use_container_width=True)
+        else:
+            st.info("Feature importance ke liye model file chahiye.")
 
     st.markdown("---")
-    st.subheader("🎯 Model Confusion Matrix & Reliability Scorecard")
-    st.write("Dekhein ke unseen test dataset (**170,537 product pairs**) par model ne kitni accurate classification ki hai:")
 
-    col_cm1, col_cm2 = st.columns([1, 1.2])
-
-    with col_cm1:
-        # Confusion matrix values on test evaluation
-        cm_z = [[148300, 5627], [9610, 7000]]
-        cm_text = [["148,300<br>(96.3% TN)", "5,627<br>(3.7% FP)"],
-                   ["9,610<br>(57.9% FN)", "7,000<br>(42.1% TP)"]]
-
-        fig_cm = ff_fig = px.imshow(
-            cm_z,
-            labels=dict(x="Predicted Class", y="Actual Class", color="Count"),
-            x=["Predicted: No (0)", "Predicted: Reorder (1)"],
-            y=["Actual: No (0)", "Actual: Reorder (1)"],
-            color_continuous_scale="Blues",
-            text_auto=False
-        )
-        fig_cm.update_traces(
-            text=cm_text,
-            texttemplate="%{text}",
-            textfont=dict(size=14, color="black")
-        )
-        fig_cm.update_layout(
-            title="<b>Confusion Matrix (Optimized Threshold = 0.88)</b>",
-            height=380,
-            template="plotly_white"
-        )
-        st.plotly_chart(fig_cm, use_container_width=True)
-
-    with col_cm2:
-        st.markdown("##### 🏆 Model Kitna Perfect Hai? (Executive Audit)")
-        st.markdown("""
-        <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px;">
-            <ul style="margin:0; padding-left: 20px; line-height: 1.8;">
-                <li><b>ROC-AUC (0.8355):</b> Grocery recommender systems me <b>0.80+ score top-tier enterprise grade</b> hota hai. Model 83.5% cases me reordered item ko non-reordered se accurately distinguish karta hai.</li>
-                <li><b>91.05% Accuracy:</b> 170,500+ items me se model 155,300+ items par 100% accurate prediction deta hai.</li>
-                <li><b>Noise Reduction (96.3% TN):</b> Catalog ke irrelevant non-reorder items ko filter out karke homepage clean rakhta hai.</li>
-                <li><b>Business ROI:</b> Customer ko search karne ki zaroorat nahi parti; unke <b>75% regular groceries</b> cart kholte hi top recommendations me aa jate hain.</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
+    # ---- 4. Confusion matrix (asal, slider ke threshold par)
+    st.subheader("🎯 Confusion Matrix & Reliability Scorecard")
+    if SAMPLE_OK and sim_t is not None:
+        st.write(f"Held-out test sample (**{len(Y_S):,} product pairs**) par model ki classification, threshold **{sim_t:.2f}** par:")
+        col_cm1, col_cm2 = st.columns([1, 1.2])
+        with col_cm1:
+            tn, fp, fn, tp = cur["tn"], cur["fp"], cur["fn"], cur["tp"]
+            cm_z = [[tn, fp], [fn, tp]]
+            n0, n1 = max(tn + fp, 1), max(fn + tp, 1)
+            cm_text = [[f"{tn:,}<br>({tn / n0 * 100:.1f}% TN)", f"{fp:,}<br>({fp / n0 * 100:.1f}% FP)"],
+                       [f"{fn:,}<br>({fn / n1 * 100:.1f}% FN)", f"{tp:,}<br>({tp / n1 * 100:.1f}% TP)"]]
+            fig_cm = px.imshow(
+                cm_z,
+                labels=dict(x="Predicted Class", y="Actual Class", color="Count"),
+                x=["Predicted: No (0)", "Predicted: Reorder (1)"],
+                y=["Actual: No (0)", "Actual: Reorder (1)"],
+                color_continuous_scale="Blues", text_auto=False
+            )
+            fig_cm.update_traces(text=cm_text, texttemplate="%{text}", textfont=dict(size=14, color="black"))
+            fig_cm.update_layout(title=f"<b>Confusion Matrix (Threshold = {sim_t:.2f})</b>", height=380, template="plotly_white")
+            st.plotly_chart(fig_cm, use_container_width=True)
+        with col_cm2:
+            st.markdown("##### 🏆 Executive Audit (live numbers)")
+            auc_a = float(roc_auc_score(Y_S, P_S))
+            st.markdown(f"""
+            <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px;">
+                <ul style="margin:0; padding-left: 20px; line-height: 1.8;">
+                    <li><b>ROC-AUC ({auc_a:.3f}):</b> Model ek reorder wale aur ek non-reorder wale item me se reorder wale ko {auc_a * 100:.1f}% baar zyada score deta hai.</li>
+                    <li><b>Precision ({cur['precision'] * 100:.1f}%):</b> Jab model "reorder hoga" kehta hai, to lagbhag {cur['precision'] * 10:.1f} / 10 baar sahi hota hai.</li>
+                    <li><b>Recall ({cur['recall'] * 100:.1f}%):</b> Asal reorders me se itne model pakad leta hai; baqi miss hote hain.</li>
+                    <li><b>Accuracy ({cur['accuracy'] * 100:.1f}%):</b> Is imbalanced data me hamesha "No" kehne par bhi {(1 - base_rate) * 100:.1f}% milti hai, isliye is par bharosa na karo.</li>
+                    <li><b>Trade-off:</b> Threshold barhane se precision barhti hai lekin recall girta hai. Slider se khud dekho.</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("Confusion matrix ke liye model aur test sample file chahiye.")
 
 
 # =========================================================
@@ -539,6 +650,7 @@ elif page == "🔮 Real-Time Prediction":
         up_streak_since_first = float(up_total_orders / max(1, (user_total_orders - up_first_order_number + 1)))
         up_slot_priority_ratio = float(up_avg_cart_position / max(1, user_avg_basket_size))
         reorder_gap_ratio = float(days_since_prior_order / max(1.0, user_avg_days_between_orders))
+        dept_avg_reorder_ratio = 0.55  # approximation (training me department ka average reorder ratio)
 
         input_data = pd.DataFrame([{
             'user_total_orders': user_total_orders,
@@ -567,12 +679,17 @@ elif page == "🔮 Real-Time Prediction":
             'order_dow': order_dow,
             'order_hour_of_day': order_hour_of_day,
             'days_since_prior_order': days_since_prior_order,
-            'reorder_gap_ratio': reorder_gap_ratio
+            'reorder_gap_ratio': reorder_gap_ratio,
+            'dept_avg_reorder_ratio': dept_avg_reorder_ratio
         }])
         
-        # Ensure column order matches model expectations exactly
-        if hasattr(model, 'feature_names_in_'):
-            input_data = input_data[model.feature_names_in_]
+        # Model jin features par train hua, wahi columns aur wahi order use karo
+        if MODEL_FEATURES:
+            missing = [c for c in MODEL_FEATURES if c not in input_data.columns]
+            if missing:
+                st.error(f"Model ko ye features chahiye jo form me nahi hain: {missing}")
+                st.stop()
+            input_data = input_data[MODEL_FEATURES]
             
         if model is not None:
             prob = float(model.predict_proba(input_data)[0, 1])
@@ -592,16 +709,16 @@ elif page == "🔮 Real-Time Prediction":
                 title={'text': "<b>Reorder Likelihood</b>", 'font': {'size': 20}},
                 gauge={
                     'axis': {'range': [0, 100]},
-                    'bar': {'color': "#10B981" if prob >= 0.5 else "#EF4444"},
+                    'bar': {'color': "#10B981" if prob >= THRESHOLD else "#EF4444"},
                     'steps': [
-                        {'range': [0, 35], 'color': "#FEE2E2"},
-                        {'range': [35, 60], 'color': "#FEF3C7"},
-                        {'range': [60, 100], 'color': "#D1FAE5"}
+                        {'range': [0, THRESHOLD * 60], 'color': "#FEE2E2"},
+                        {'range': [THRESHOLD * 60, THRESHOLD * 100], 'color': "#FEF3C7"},
+                        {'range': [THRESHOLD * 100, 100], 'color': "#D1FAE5"}
                     ],
                     'threshold': {
                         'line': {'color': "black", 'width': 4},
                         'thickness': 0.75,
-                        'value': 50
+                        'value': THRESHOLD * 100
                     }
                 }
             ))
@@ -610,24 +727,25 @@ elif page == "🔮 Real-Time Prediction":
             
         with res_col2:
             st.write("### Decision Analysis")
-            if prob >= 0.60:
+            st.caption(f"Decision threshold: **{THRESHOLD:.2f}** (F1-optimized). Model probabilities class-weight ki wajah se calibrated nahi hain, ye reorder scores hain.")
+            if prob >= THRESHOLD:
                 st.markdown('<div class="badge-high">✅ HIGH REORDER AFFINITY</div>', unsafe_allow_html=True)
-                st.success(f"Model calculates a **{prob*100:.1f}% probability** that the user will reorder this product.")
+                st.success(f"Model calculates a **reorder score of {prob*100:.1f}%**, which is above the decision threshold, so the user is likely to reorder this product.")
                 st.markdown("""
                 **Recommended Action:**
                 - Product ko user ke cart me **"Buy It Again"** ya **"Quick Reorder"** slot #1 par show karein.
                 - Automated push reminder trigger karein agar user restock cycle cross kar raha ho.
                 """)
-            elif prob >= 0.35:
+            elif prob >= THRESHOLD * 0.6:
                 st.markdown('<div class="badge-low" style="background-color:#FEF3C7; color:#92400E;">⚠️ MODERATE REORDER AFFINITY</div>', unsafe_allow_html=True)
-                st.warning(f"Model calculates a **{prob*100:.1f}% probability**.")
+                st.warning(f"Model calculates a **reorder score of {prob*100:.1f}%**, below the decision threshold but not far from it.")
                 st.markdown("""
                 **Recommended Action:**
                 - Product ko related categories browsing ke time recommended carousel me display karein.
                 """)
             else:
                 st.markdown('<div class="badge-low">❌ LOW REORDER AFFINITY</div>', unsafe_allow_html=True)
-                st.error(f"Model calculates a **{prob*100:.1f}% probability**.")
+                st.error(f"Model calculates a **reorder score of {prob*100:.1f}%**, well below the decision threshold.")
                 st.markdown("""
                 **Recommended Action:**
                 - Do not clutter homepage; suggest alternative popular items or newly launched products instead.
